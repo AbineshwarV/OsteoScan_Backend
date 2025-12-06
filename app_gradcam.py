@@ -30,12 +30,10 @@ except ImportError:
 
 import tensorflow as tf
 from tensorflow.keras.models import load_model
-from tensorflow.keras.layers import Conv2D 
+from tensorflow.keras.layers import Conv2D
 
-# ✅ NEW: imports for downloading & unzipping model in Render
-import requests
-import zipfile
-import tempfile
+# ✅ NEW: for downloading model from Hugging Face Hub
+from huggingface_hub import snapshot_download
 
 # -----------------------------
 # USER SETTINGS (edit if needed)
@@ -47,7 +45,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # Original local Windows model folder (your existing path)
 LOCAL_MODEL_DIR = Path(r"C:\Final_Year_Project\CustomCNN_3_knee_osteo_model")
 
-# Default model folder inside the project (for Render)
+# Default model folder inside the project (for Render or other non-Windows env)
 DEFAULT_MODEL_DIR = BASE_DIR / "CustomCNN_3_knee_osteo_model"
 
 # Choose which directory to use:
@@ -61,9 +59,9 @@ else:
 # This is what load_model() will receive
 MODEL_PATH = str(MODEL_DIR)
 
-# On Render, set this env var to a direct-download URL of a ZIP containing
-# CustomCNN_3_knee_osteo_model/ (with config.json, metadata.json, model.weights.h5)
-MODEL_ZIP_URL = os.environ.get("MODEL_ZIP_URL")
+# On Render, set this env var to your HF repo id, e.g. "username/CustomCNN_3_knee_osteo_model"
+HF_REPO_ID = os.environ.get("HF_REPO_ID")  # e.g. "abineshwar/CustomCNN_3_knee_osteo_model"
+HF_REVISION = os.environ.get("HF_REVISION")  # optional (branch/tag/commit), or None
 
 # Class labels in the SAME order used during training
 CLASS_NAMES = ["Osteopenia", "Osteoporosis", "Normal"]
@@ -84,11 +82,11 @@ def ensure_model_downloaded():
     Behaviour:
     - If LOCAL_MODEL_DIR exists on disk, use that (your Windows path).
     - Else, expect the model folder inside the project (DEFAULT_MODEL_DIR).
-      If not present, download a ZIP from MODEL_ZIP_URL and extract it.
+      If not present, download from Hugging Face Hub using HF_REPO_ID.
     """
     global MODEL_DIR, MODEL_PATH  # so that app_api sees the final path
 
-    # If the original local folder exists, nothing to do
+    # If the original local folder exists, nothing to do (your PC)
     if LOCAL_MODEL_DIR.exists():
         MODEL_DIR = LOCAL_MODEL_DIR
         MODEL_PATH = str(MODEL_DIR)
@@ -99,7 +97,7 @@ def ensure_model_downloaded():
         else:
             print("[MODEL] Local folder exists but model.weights.h5 not found:", weights_file)
 
-    # Otherwise, use the project-relative folder
+    # Otherwise, use the project-relative folder (for Render, etc.)
     MODEL_DIR = DEFAULT_MODEL_DIR
     MODEL_PATH = str(MODEL_DIR)
     weights_file = MODEL_DIR / "model.weights.h5"
@@ -109,43 +107,37 @@ def ensure_model_downloaded():
         print("[MODEL] Using model folder in project dir:", MODEL_DIR)
         return
 
-    # If no URL configured, we cannot download on Render
-    if not MODEL_ZIP_URL:
+    # If no HF repo configured, we cannot download on Render
+    if not HF_REPO_ID:
         raise RuntimeError(
-            "Model folder not found and MODEL_ZIP_URL is not set.\n"
-            "Set MODEL_ZIP_URL to a direct-download ZIP containing CustomCNN_3_knee_osteo_model/."
+            "Model folder not found and HF_REPO_ID is not set.\n"
+            "Create a Hugging Face repo with your model files and set HF_REPO_ID, "
+            "for example: 'abineshwar/CustomCNN_3_knee_osteo_model'."
         )
 
-    print("[MODEL] Model not found locally. Downloading ZIP from:")
-    print("        ", MODEL_ZIP_URL)
+    print("[MODEL] Model not found locally. Downloading from Hugging Face Hub...")
+    print("        repo_id =", HF_REPO_ID)
+    if HF_REVISION:
+        print("        revision =", HF_REVISION)
 
-    MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
+    # Download entire repo into DEFAULT_MODEL_DIR
+    snapshot_download(
+        repo_id=HF_REPO_ID,
+        revision=HF_REVISION,
+        local_dir=str(DEFAULT_MODEL_DIR),
+        local_dir_use_symlinks=False,
+        repo_type="model",
+    )
 
-    # Download ZIP to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        with requests.get(MODEL_ZIP_URL, stream=True) as r:
-            r.raise_for_status()
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    tmp.write(chunk)
-
-    print("[MODEL] Download complete. Extracting ZIP...")
-
-    # We assume the ZIP contains CustomCNN_3_knee_osteo_model/ at its root
-    with zipfile.ZipFile(tmp_path, "r") as zip_ref:
-        zip_ref.extractall(BASE_DIR)
-
-    tmp_path.unlink(missing_ok=True)
-
+    # After download, check weights file
     if not weights_file.exists():
         raise RuntimeError(
-            f"After extraction, {weights_file} not found.\n"
-            "Check that the ZIP contains the 'CustomCNN_3_knee_osteo_model' folder "
-            "with model.weights.h5 inside."
+            f"After download, {weights_file} not found.\n"
+            "Make sure your HF repo contains config.json, metadata.json and model.weights.h5 "
+            "at its root (or adjust the path logic accordingly)."
         )
 
-    print("[MODEL] Model extracted to:", MODEL_DIR)
+    print("[MODEL] Model downloaded to:", MODEL_DIR)
 
 
 def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
@@ -204,7 +196,7 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
 
     # If grads is list/tuple, take first
     if isinstance(grads, (list, tuple)):
-            grads = grads[0]
+        grads = grads[0]
 
     # Global average pooling of gradients over (H, W)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
