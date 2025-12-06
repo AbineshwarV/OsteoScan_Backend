@@ -2,11 +2,8 @@
 """
 app_api.py
 
-Flask wrapper that imports helpers from your existing (unchanged) app_gradcam.py
-and exposes POST /predict for web frontends.
-
-Place this file in the same folder as app_gradcam.py and run:
-    python app_api.py
+Flask wrapper that imports helpers from app_gradcam.py
+and exposes POST /predict for web frontends (e.g. React).
 """
 
 import io
@@ -40,10 +37,6 @@ def pil_to_dataurl(pil_img: Image.Image) -> str:
 
 
 def make_overlay_and_heatmap(original_pil: Image.Image, heatmap: np.ndarray, alpha=HEATMAP_ALPHA):
-    """
-    heatmap: numpy HxW in [0,1]
-    returns (overlay_pil, heatmap_pil)
-    """
     heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(
         original_pil.size, resample=Image.BILINEAR
     )
@@ -60,7 +53,6 @@ def make_overlay_and_heatmap(original_pil: Image.Image, heatmap: np.ndarray, alp
     return overlay_pil, heatmap_pil
 
 
-# --- Flask app ---
 app = Flask(__name__)
 CORS(app)
 
@@ -90,21 +82,6 @@ def ping():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    POST form-data:
-      - image: file (required)
-      - explain_index: int (optional) - which class index to explain; if absent use predicted index
-
-    Response JSON:
-      {
-        "label": "...",
-        "index": 0,
-        "confidence": 0.9123,
-        "original": "data:image/png;base64,...",
-        "heatmap": "data:image/png;base64,...",
-        "overlay": "data:image/png;base64,..."
-      }
-    """
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded. Use field name 'image'."}), 400
 
@@ -155,6 +132,6 @@ def predict():
 
 
 if __name__ == "__main__":
-    # HF Spaces also sets PORT env; this is fine for local dev too.
-    port = int(os.environ.get("PORT", 5000))
+    # Hugging Face Spaces (Docker) expects port 7860
+    port = int(os.environ.get("PORT", 7860))
     app.run(host="0.0.0.0", port=port, debug=False)
