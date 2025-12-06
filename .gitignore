@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Model files
+CustomCNN_3_knee_osteo_model/
+*.h5
+*.keras
+*.weights.h5
+*.ckpt
