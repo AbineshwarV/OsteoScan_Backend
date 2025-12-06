@@ -2,7 +2,7 @@
 """
 app_api.py
 
-Flask wrapper that imports helpers from your existing app_gradcam.py
+Flask wrapper that imports helpers from your existing (unchanged) app_gradcam.py
 and exposes POST /predict for web frontends.
 
 Place this file in the same folder as app_gradcam.py and run:
@@ -11,14 +11,14 @@ Place this file in the same folder as app_gradcam.py and run:
 
 import io
 import base64
-import os  # needed for PORT reading (Render)
+import os
 import numpy as np
 from PIL import Image
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Import constants and functions from your script
 from app_gradcam import (
+    MODEL_PATH,
     CLASS_NAMES,
     IMG_SIZE,
     HEATMAP_ALPHA,
@@ -26,14 +26,10 @@ from app_gradcam import (
     find_last_conv_layer,
     make_gradcam_heatmap,
     ensure_model_downloaded,
-    build_customcnn_model,
 )
 
+from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
-
-# --- Flask app ---
-app = Flask(__name__)
-CORS(app)  # development: allow cross-origin. Restrict in production.
 
 
 def pil_to_dataurl(pil_img: Image.Image) -> str:
@@ -48,11 +44,13 @@ def make_overlay_and_heatmap(original_pil: Image.Image, heatmap: np.ndarray, alp
     heatmap: numpy HxW in [0,1]
     returns (overlay_pil, heatmap_pil)
     """
-    heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(original_pil.size, resample=Image.BILINEAR)
+    heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(
+        original_pil.size, resample=Image.BILINEAR
+    )
     heatmap_arr = np.asarray(heatmap_img).astype("float32") / 255.0
 
     cmap = plt.get_cmap("jet")
-    colored = cmap(heatmap_arr)[:, :, :3]  # drop alpha channel
+    colored = cmap(heatmap_arr)[:, :, :3]
 
     orig_arr = np.asarray(original_pil.convert("RGB")).astype("float32") / 255.0
     overlay = np.clip(orig_arr * (1 - alpha) + colored * alpha, 0, 1)
@@ -62,28 +60,21 @@ def make_overlay_and_heatmap(original_pil: Image.Image, heatmap: np.ndarray, alp
     return overlay_pil, heatmap_pil
 
 
-# ✅ Ensure model folder is present (download HF repo if needed)
+# --- Flask app ---
+app = Flask(__name__)
+CORS(app)
+
 print("[API] Ensuring model is available on disk...")
-MODEL_DIR = ensure_model_downloaded()
-print("[API] Using MODEL_DIR:", MODEL_DIR)
+ensure_model_downloaded()
 
-# Path to weights file inside that folder
-WEIGHTS_PATH = os.path.join(str(MODEL_DIR), "model.weights.h5")
-print("[API] Loading weights from:", WEIGHTS_PATH)
-
-# Build model architecture and load weights
+print("[API] Loading model from:", MODEL_PATH)
 try:
-    model = build_customcnn_model(
-        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
-        num_classes=len(CLASS_NAMES),
-    )
-    model.load_weights(WEIGHTS_PATH)
-    print("[API] Model weights loaded successfully ✅")
+    model = load_model(MODEL_PATH)
 except Exception as e:
-    print("[API] Failed to load model weights:", e)
+    print("[API] Failed to load model:", e)
     raise
 
-print("[API] Model ready.")
+print("[API] Model loaded.")
 try:
     last_conv_layer = find_last_conv_layer(model)
     print("[API] Last conv layer:", last_conv_layer)
@@ -123,7 +114,6 @@ def predict():
     except Exception as e:
         return jsonify({"error": f"Failed to read image: {e}"}), 400
 
-    # Preprocess and predict
     try:
         x = preprocess_pil(pil_img, target_size=IMG_SIZE)
         preds = model.predict(x)
@@ -137,7 +127,6 @@ def predict():
     pred_label = CLASS_NAMES[pred_idx] if pred_idx < len(CLASS_NAMES) else f"class_{pred_idx}"
     pred_prob = float(preds[pred_idx])
 
-    # optional override
     explain_index = request.form.get("explain_index")
     if explain_index is not None:
         try:
@@ -147,16 +136,13 @@ def predict():
     else:
         explain_index = pred_idx
 
-    # compute grad-cam
     try:
         heatmap = make_gradcam_heatmap(x, model, last_conv_layer, explain_index)
     except Exception as e:
         return jsonify({"error": f"Grad-CAM error: {e}"}), 500
 
-    # make overlay + heatmap images (PIL)
     overlay_pil, heatmap_pil = make_overlay_and_heatmap(pil_img, heatmap, alpha=HEATMAP_ALPHA)
 
-    # encode images to data URLs
     resp = {
         "label": pred_label,
         "index": pred_idx,
@@ -169,6 +155,6 @@ def predict():
 
 
 if __name__ == "__main__":
-    # for development only. On Render, gunicorn will run `app`.
-    port = int(os.environ.get("PORT", 5000))  # important for Render
+    # HF Spaces also sets PORT env; this is fine for local dev too.
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
