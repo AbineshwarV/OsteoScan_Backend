@@ -2,7 +2,7 @@
 """
 app_api.py
 
-Flask wrapper that imports helpers from your existing (unchanged) app_gradcam.py
+Flask wrapper that imports helpers from your existing app_gradcam.py
 and exposes POST /predict for web frontends.
 
 Place this file in the same folder as app_gradcam.py and run:
@@ -11,31 +11,27 @@ Place this file in the same folder as app_gradcam.py and run:
 
 import io
 import base64
-import os  # ✅ NEW: needed for PORT reading (Render)
+import os  # needed for PORT reading (Render)
 import numpy as np
 from PIL import Image
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Import constants and functions from your unchanged script
+# Import constants and functions from your script
 from app_gradcam import (
-    MODEL_PATH,
     CLASS_NAMES,
     IMG_SIZE,
     HEATMAP_ALPHA,
     preprocess_pil,
     find_last_conv_layer,
     make_gradcam_heatmap,
-    ensure_model_downloaded,  # ✅ NEW: we'll add this in app_gradcam.py
+    ensure_model_downloaded,
+    build_customcnn_model,
+    WEIGHTS_FILENAME,
 )
 
-from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
 
-# --- Optional: if your model uses custom layers/objects, add them here:
-# from my_custom_layers import MyLayer, MyOtherLayer
-# custom_objects = {"MyLayer": MyLayer, "MyOtherLayer": MyLayer}
-# Then call: load_model(MODEL_PATH, custom_objects=custom_objects)
 
 def pil_to_dataurl(pil_img: Image.Image) -> str:
     buf = io.BytesIO()
@@ -67,19 +63,23 @@ def make_overlay_and_heatmap(original_pil: Image.Image, heatmap: np.ndarray, alp
 app = Flask(__name__)
 CORS(app)  # development: allow cross-origin. Restrict in production.
 
-# ✅ NEW: ensure model folder is present (download/unzip if needed)
+# Ensure model folder + weights are present (download if needed)
 print("[API] Ensuring model is available on disk...")
-ensure_model_downloaded()
+model_dir = ensure_model_downloaded()
+weights_path = model_dir / WEIGHTS_FILENAME
+print(f"[API] Using MODEL_DIR: {model_dir}")
+print(f"[API] Loading weights from: {weights_path}")
 
-# Load model once (use custom_objects if needed)
-print("[API] Loading model from:", MODEL_PATH)
+# Build architecture and load weights
 try:
-    model = load_model(MODEL_PATH)
+    model = build_customcnn_model(input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3), num_classes=len(CLASS_NAMES))
+    model.load_weights(str(weights_path))
+    print("[API] Model weights loaded successfully ✅")
 except Exception as e:
-    print("[API] Failed to load model:", e)
+    print("[API] Failed to load model weights:", e)
     raise
 
-print("[API] Model loaded.")
+print("[API] Model ready.")
 try:
     last_conv_layer = find_last_conv_layer(model)
     print("[API] Last conv layer:", last_conv_layer)
@@ -166,5 +166,5 @@ def predict():
 
 if __name__ == "__main__":
     # for development only. On Render, gunicorn will run `app`.
-    port = int(os.environ.get("PORT", 5000))  # ✅ important for Render
+    port = int(os.environ.get("PORT", 5000))  # important for Render
     app.run(host="0.0.0.0", port=port, debug=False)
