@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 
-# ✅ Try tkinter, but don't crash if missing (Render)
+# ✅ Make tkinter optional (Render may not have it)
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, Tk
@@ -32,7 +32,7 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.layers import Conv2D
 
-# ✅ Hugging Face Hub for downloading model
+# ✅ NEW: Hugging Face download
 from huggingface_hub import snapshot_download
 
 # -----------------------------
@@ -42,24 +42,33 @@ from huggingface_hub import snapshot_download
 # Base directory = folder where this file lives
 BASE_DIR = Path(__file__).resolve().parent
 
-# Name of the H5 model file
-MODEL_FILENAME = "CustomCNN_3_knee_osteo_model.h5"
+# Original local Windows model folder (your existing path)
+LOCAL_MODEL_DIR = Path(r"C:\Final_Year_Project\CustomCNN_3_knee_osteo_model")
 
-# Local Windows H5 path (after you saved it)
-LOCAL_MODEL_FILE = Path(r"C:\Final_Year_Project") / MODEL_FILENAME
+# Default model folder for HF cache inside the project (used on Render)
+HF_CACHE_ROOT = BASE_DIR / "hf_model_cache"
 
-# Default H5 path in project (for Render)
-DEFAULT_MODEL_FILE = BASE_DIR / MODEL_FILENAME
+# For backwards compatibility, keep your original DEFAULT_MODEL_DIR & MODEL_PATH
+DEFAULT_MODEL_DIR = BASE_DIR / "CustomCNN_3_knee_osteo_model"
 
-# Where to cache HF downloads
-HF_CACHE_DIR = BASE_DIR / "hf_model_cache"
+if LOCAL_MODEL_DIR.exists():
+    MODEL_DIR = LOCAL_MODEL_DIR
+else:
+    MODEL_DIR = DEFAULT_MODEL_DIR
 
-# Hugging Face model repo info
+# This is what load_model() will receive in your local GUI script
+MODEL_PATH = str(MODEL_DIR)
+
+# Hugging Face repo where your model lives
+# Repo structure:
+#   .gitattributes
+#   CustomCNN_3_knee_osteo_model/
+#       config.json
+#       metadata.json
+#       model.weights.h5
 HF_REPO_ID = os.environ.get("HF_REPO_ID", "AbineshwarV/customcnn-3-knee-osteo-knee")
 HF_REVISION = os.environ.get("HF_REVISION")  # optional
-
-# This will be updated by ensure_model_downloaded()
-MODEL_PATH = str(DEFAULT_MODEL_FILE)
+HF_INNER_DIRNAME = "CustomCNN_3_knee_osteo_model"
 
 # Class labels in the SAME order used during training
 CLASS_NAMES = ["Osteopenia", "Osteoporosis", "Normal"]
@@ -72,86 +81,128 @@ HEATMAP_ALPHA = 0.4
 # -----------------------------
 
 
+# ✅ NEW: architecture builder (used by API to load weights)
+def build_customcnn_model(input_shape=(224, 224, 3), num_classes=len(CLASS_NAMES)):
+    """
+    Recreate EXACTLY the same architecture you used during training.
+
+    ⚠️ IMPORTANT:
+    Replace the SAMPLE architecture below with your REAL model definition
+    (same layers, same order, same activations, same final Dense units).
+    """
+    from tensorflow.keras import layers, models
+
+    model = models.Sequential()
+
+    # ---------- SAMPLE ARCHITECTURE (REPLACE WITH YOURS) ----------
+    model.add(layers.Conv2D(32, (3, 3), activation="relu", input_shape=input_shape))
+    model.add(layers.MaxPooling2D((2, 2)))
+
+    model.add(layers.Conv2D(64, (3, 3), activation="relu"))
+    model.add(layers.MaxPooling2D((2, 2)))
+
+    model.add(layers.Conv2D(128, (3, 3), activation="relu"))
+    model.add(layers.MaxPooling2D((2, 2)))
+
+    model.add(layers.Flatten())
+    model.add(layers.Dense(128, activation="relu"))
+    model.add(layers.Dense(num_classes, activation="softmax"))
+    # --------------------------------------------------------------
+
+    return model
+
+
+# ✅ UPDATED: used by app_api.py to get HF weights folder
 def ensure_model_downloaded():
     """
-    Ensure a single H5 model file exists and set MODEL_PATH to it.
+    Ensure that CustomCNN_3_knee_osteo_model/model.weights.h5 exists.
 
-    Order:
-    1. If LOCAL_MODEL_FILE exists (on your PC), use that.
-    2. Else if DEFAULT_MODEL_FILE exists (in repo / after first download), use that.
-    3. Else download from Hugging Face Hub into HF_CACHE_DIR and
-       pick the .h5 file (prefer MODEL_FILENAME if present).
+    Behaviour:
+    - If LOCAL_MODEL_DIR exists on disk (your Windows path), use that.
+      Expect `model.weights.h5` inside LOCAL_MODEL_DIR (or adjust if needed).
+    - Else, download from Hugging Face into HF_CACHE_ROOT, which will contain:
+        HF_CACHE_ROOT/
+          .gitattributes
+          CustomCNN_3_knee_osteo_model/
+              config.json
+              metadata.json
+              model.weights.h5
+
+    Returns:
+        Path to the folder that contains model.weights.h5
+        (this is what app_api will treat as MODEL_DIR).
     """
-    global MODEL_PATH
+    global MODEL_DIR, MODEL_PATH
 
-    # 1) Use local PC file
-    if LOCAL_MODEL_FILE.exists():
-        MODEL_PATH = str(LOCAL_MODEL_FILE)
-        print("[MODEL] Using local H5 model:", MODEL_PATH)
-        return
+    # 1) Local Windows folder for development
+    local_weights = LOCAL_MODEL_DIR / "model.weights.h5"
+    if LOCAL_MODEL_DIR.exists() and local_weights.exists():
+        MODEL_DIR = LOCAL_MODEL_DIR
+        MODEL_PATH = str(MODEL_DIR)
+        print("[MODEL] Using existing local model at:", MODEL_DIR)
+        return MODEL_DIR
 
-    # 2) Use project H5 (already present)
-    if DEFAULT_MODEL_FILE.exists():
-        MODEL_PATH = str(DEFAULT_MODEL_FILE)
-        print("[MODEL] Using project H5 model:", MODEL_PATH)
-        return
+    # 2) HF cache root on this machine (Render etc.)
+    hf_root = HF_CACHE_ROOT
+    inner_dir = hf_root / HF_INNER_DIRNAME
+    weights_file = inner_dir / "model.weights.h5"
 
-    # 3) Need to download from HF
+    # If already downloaded, use it
+    if weights_file.exists():
+        MODEL_DIR = inner_dir
+        MODEL_PATH = str(MODEL_DIR)
+        print("[MODEL] Using existing HF model at:", MODEL_DIR)
+        return MODEL_DIR
+
+    # 3) Need to download from Hugging Face
     if not HF_REPO_ID:
-        raise RuntimeError("HF_REPO_ID is not set and no local model file found.")
+        raise RuntimeError(
+            "Model not found locally and HF_REPO_ID is not set.\n"
+            "Set HF_REPO_ID to your HF repo, e.g. 'AbineshwarV/customcnn-3-knee-osteo-knee'."
+        )
 
-    print("[MODEL] H5 model not found locally. Downloading from Hugging Face Hub...")
+    print("[MODEL] Model not found locally. Downloading from Hugging Face Hub...")
     print("        repo_id =", HF_REPO_ID)
     if HF_REVISION:
         print("        revision =", HF_REVISION)
 
-    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    hf_root.mkdir(parents=True, exist_ok=True)
 
-    # Download all repo files into cache dir
-    local_dir = snapshot_download(
+    snapshot_download(
         repo_id=HF_REPO_ID,
         revision=HF_REVISION,
-        local_dir=str(HF_CACHE_DIR),
+        local_dir=str(hf_root),
         local_dir_use_symlinks=False,
         repo_type="model",
     )
 
-    local_dir = Path(local_dir)
-    print("[MODEL] Files downloaded under:", local_dir)
+    # After download, expect:
+    # HF_CACHE_ROOT / "CustomCNN_3_knee_osteo_model" / "model.weights.h5"
+    inner_dir = hf_root / HF_INNER_DIRNAME
+    weights_file = inner_dir / "model.weights.h5"
 
-    # Find .h5 file
-    candidates = []
-    for root, dirs, files in os.walk(local_dir):
-        for name in files:
-            if name.endswith(".h5"):
-                candidates.append(Path(root) / name)
+    # Debug print
+    if inner_dir.exists():
+        print("[MODEL] inner_dir contents:")
+        for p in inner_dir.iterdir():
+            print("   ", p)
+    else:
+        print("[MODEL] inner_dir does NOT exist:", inner_dir)
 
-    if not candidates:
+    if not weights_file.exists():
         raise RuntimeError(
-            f"No .h5 files found in HF repo {HF_REPO_ID}. "
-            "Upload your CustomCNN_3_knee_osteo_model.h5 there."
+            f"After download, {weights_file} not found.\n"
+            "Your HF repo must contain:\n"
+            "  .gitattributes\n"
+            f"  {HF_INNER_DIRNAME}/config.json\n"
+            f"  {HF_INNER_DIRNAME}/metadata.json\n"
+            f"  {HF_INNER_DIRNAME}/model.weights.h5\n"
         )
 
-    # Prefer file named exactly MODEL_FILENAME if present
-    chosen = None
-    for p in candidates:
-        if p.name == MODEL_FILENAME:
-            chosen = p
-            break
-    if chosen is None:
-        chosen = candidates[0]
-
-    print("[MODEL] Using downloaded H5 model:", chosen)
-
-    # Also copy it into project root as DEFAULT_MODEL_FILE for next time (optional but nice)
-    try:
-        DEFAULT_MODEL_FILE.write_bytes(chosen.read_bytes())
-        MODEL_PATH = str(DEFAULT_MODEL_FILE)
-        print("[MODEL] Copied to project file:", DEFAULT_MODEL_FILE)
-    except Exception as e:
-        # If copy fails, just use the cache path
-        print("[MODEL] Could not copy model to project dir:", e)
-        MODEL_PATH = str(chosen)
+    MODEL_DIR = inner_dir
+    MODEL_PATH = str(MODEL_DIR)
+    print("[MODEL] Model downloaded to:", MODEL_DIR)
+    return MODEL_DIR
 
 
 def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
@@ -218,15 +269,20 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
 
 
 def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, label_text: str):
-    """Create a heatmap overlay and show/save results."""
+    """
+    Create a heatmap overlay and show/save results.
+    heatmap: numpy (h,w) in [0,1]
+    """
     heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(original_pil.size, resample=Image.BILINEAR)
-    heatmap_arr = np.asarray(heatmap_img).astype("float32") / 255.0
+    heatmap_arr = np.asarray(heatmap_img).astype("float32") / 255.0  # 0..1
 
     cmap = plt.get_cmap("jet")
-    colored_heatmap = cmap(heatmap_arr)[:, :, :3]
+    colored_heatmap = cmap(heatmap_arr)[:, :, :3]  # drop alpha channel
 
     orig_arr = np.asarray(original_pil.convert("RGB")).astype("float32") / 255.0
-    overlay = np.clip(orig_arr * (1 - HEATMAP_ALPHA) + colored_heatmap * HEATMAP_ALPHA, 0, 1)
+
+    overlay = orig_arr * (1 - HEATMAP_ALPHA) + colored_heatmap * HEATMAP_ALPHA
+    overlay = np.clip(overlay, 0, 1)
 
     overlay_pil = Image.fromarray(np.uint8(overlay * 255))
 
@@ -263,11 +319,8 @@ def pick_image_file():
 
 
 def main():
-    # ✅ Ensure H5 model exists (local or from HF)
-    ensure_model_downloaded()
-
-    # Load model
-    print("[INFO] Loading model from:", MODEL_PATH)
+    # Local GUI script (unchanged behaviour on your PC)
+    print("[INFO] Loading model:", MODEL_PATH)
     try:
         model = load_model(MODEL_PATH)
     except Exception as e:
@@ -286,7 +339,6 @@ def main():
             messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
         return
 
-    # Warmup predict
     try:
         dummy = np.zeros((1, IMG_SIZE[0], IMG_SIZE[1], 3), dtype="float32")
         model.predict(dummy)
