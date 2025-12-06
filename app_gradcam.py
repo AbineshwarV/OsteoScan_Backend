@@ -15,8 +15,18 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import filedialog, messagebox, Tk
+
+# ✅ Try importing tkinter (GUI) – OK on your PC, missing on Render
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, Tk
+    TK_AVAILABLE = True
+except ImportError:
+    tk = None
+    filedialog = None
+    messagebox = None
+    Tk = None
+    TK_AVAILABLE = False
 
 import tensorflow as tf
 from tensorflow.keras.models import load_model
@@ -66,7 +76,7 @@ HEATMAP_ALPHA = 0.4
 # -----------------------------
 
 
-# ✅ NEW: used by app_api.py before load_model(MODEL_PATH)
+# ✅ used by app_api.py before load_model(MODEL_PATH)
 def ensure_model_downloaded():
     """
     Ensure that CustomCNN_3_knee_osteo_model/ with model.weights.h5 exists.
@@ -269,6 +279,9 @@ def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, la
 
 
 def pick_image_file():
+    if not TK_AVAILABLE:
+        # On a headless server like Render, this won't be used anyway.
+        raise RuntimeError("Tkinter GUI is not available in this environment.")
     Tk().withdraw()
     path = filedialog.askopenfilename(
         title="Select image",
@@ -284,7 +297,8 @@ def main():
         model = load_model(MODEL_PATH)
     except Exception as e:
         print("[ERROR] Failed to load model:", e)
-        messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
+        if TK_AVAILABLE and messagebox is not None:
+            messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
         return
 
     # Find last conv layer
@@ -294,7 +308,8 @@ def main():
         print(f"[INFO] Using last conv layer: {last_conv_layer_name}")
     except Exception as e:
         print("[ERROR] Could not find a conv layer:", e)
-        messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
+        if TK_AVAILABLE and messagebox is not None:
+            messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
         return
 
     # Warmup predict to initialize everything
@@ -317,7 +332,8 @@ def main():
             pil_img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print("[ERROR] Could not open image:", e)
-            messagebox.showerror("Open error", f"Failed to open image: {e}")
+            if TK_AVAILABLE and messagebox is not None:
+                messagebox.showerror("Open error", f"Failed to open image: {e}")
             continue
 
         x = preprocess_pil(pil_img, target_size=IMG_SIZE)
@@ -341,7 +357,8 @@ def main():
             heatmap = make_gradcam_heatmap(x, model, last_conv_layer_name, pred_idx)
         except Exception as e:
             print("[ERROR] Could not compute Grad-CAM:", e)
-            messagebox.showerror("Grad-CAM error", f"Could not compute Grad-CAM:\n{e}")
+            if TK_AVAILABLE and messagebox is not None:
+                messagebox.showerror("Grad-CAM error", f"Could not compute Grad-CAM:\n{e}")
             continue
 
         # Save and show
@@ -351,4 +368,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if TK_AVAILABLE:
+        main()
+    else:
+        print("[INFO] Tkinter GUI is not available; cannot run local GUI mode here.")
