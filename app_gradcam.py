@@ -4,11 +4,9 @@ app_gradcam.py
 
 Local predictor + Grad-CAM explanation (single-file).
 
-Usage (local GUI):
-    python app_gradcam.py
-
-On server (Hugging Face):
-    imported by app_api.py, no GUI used.
+- Still works locally with your Windows folder.
+- On servers (like Hugging Face), it downloads the model from:
+  AbineshwarV/customcnn-3-knee-osteo-knee
 """
 
 import os
@@ -16,14 +14,22 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import filedialog, messagebox, Tk
+
+# --- tkinter is only needed for local GUI; wrap in try/except for servers ---
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, Tk
+except ImportError:
+    tk = None
+    filedialog = None
+    messagebox = None
+    Tk = None
 
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.layers import Conv2D
 
-# ✅ NEW: for downloading model from Hugging Face Hub in Spaces
+# 🆕 Hugging Face Hub import
 from huggingface_hub import snapshot_download
 
 # -----------------------------
@@ -36,24 +42,18 @@ BASE_DIR = Path(__file__).resolve().parent
 # Original local Windows model folder (your existing path)
 LOCAL_MODEL_DIR = Path(r"C:\Final_Year_Project\CustomCNN_3_knee_osteo_model")
 
-# Default model folder inside the project (for server / HF Spaces)
+# Default model folder inside the project (for servers)
 DEFAULT_MODEL_DIR = BASE_DIR / "CustomCNN_3_knee_osteo_model"
 
-# Hugging Face Hub model ID (you already created this)
-HF_MODEL_ID = os.environ.get(
-    "HF_MODEL_ID",
-    "AbineshwarV/customcnn-3-knee-osteo-knee"  # fallback if env not set
-)
+# Hugging Face model repo (you already created this)
+HF_REPO_ID = "AbineshwarV/customcnn-3-knee-osteo-knee"
 
-# Choose which directory to use:
-# - if your original Windows folder exists, use that (local dev)
-# - otherwise, use the project-relative folder (server / HF Spaces)
+# Decide initial MODEL_DIR
 if LOCAL_MODEL_DIR.exists():
     MODEL_DIR = LOCAL_MODEL_DIR
 else:
     MODEL_DIR = DEFAULT_MODEL_DIR
 
-# This is what load_model() will receive
 MODEL_PATH = str(MODEL_DIR)
 
 # Class labels in the SAME order used during training
@@ -73,12 +73,13 @@ def ensure_model_downloaded():
 
     Behaviour:
     - If LOCAL_MODEL_DIR exists on disk, use that (your Windows path).
-    - Else, expect the model folder inside the project (DEFAULT_MODEL_DIR).
-      If not present, download from Hugging Face Hub (HF_MODEL_ID).
+    - Else, check DEFAULT_MODEL_DIR inside the project.
+    - If still not present, download from Hugging Face model repo:
+        AbineshwarV/customcnn-3-knee-osteo-knee
     """
-    global MODEL_DIR, MODEL_PATH  # so that app_api sees the final path
+    global MODEL_DIR, MODEL_PATH
 
-    # ✅ 1) Local Windows dev: use your existing folder
+    # 1) Use original local folder if it exists
     if LOCAL_MODEL_DIR.exists():
         MODEL_DIR = LOCAL_MODEL_DIR
         MODEL_PATH = str(MODEL_DIR)
@@ -89,52 +90,42 @@ def ensure_model_downloaded():
         else:
             print("[MODEL] Local folder exists but model.weights.h5 not found:", weights_file)
 
-    # ✅ 2) Server / HF Spaces: project-relative folder
+    # 2) Use project-relative folder if it already exists
     MODEL_DIR = DEFAULT_MODEL_DIR
     MODEL_PATH = str(MODEL_DIR)
     weights_file = MODEL_DIR / "model.weights.h5"
 
-    # If model already exists in repo folder, done
     if weights_file.exists():
         print("[MODEL] Using model folder in project dir:", MODEL_DIR)
         return
 
-    # ✅ 3) Download from Hugging Face Hub if not present
+    # 3) Download from Hugging Face model repo
     print("[MODEL] Model not found locally. Downloading from Hugging Face Hub:")
-    print("        HF model id:", HF_MODEL_ID)
+    print("        repo_id =", HF_REPO_ID)
 
-    # Download snapshot to a cache dir
-    cache_dir = BASE_DIR / "hf_model_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # This will download the repo locally
-    repo_path = snapshot_download(
-        repo_id=HF_MODEL_ID,
-        cache_dir=str(cache_dir),
-        local_files_only=False,
+    # This will download the repo to HF cache
+    snapshot_dir = Path(
+        snapshot_download(
+            repo_id=HF_REPO_ID,
+            repo_type="model"
+        )
     )
 
-    # We expect inside that repo: CustomCNN_3_knee_osteo_model/...
-    repo_path = Path(repo_path)
-    downloaded_model_dir = repo_path / "CustomCNN_3_knee_osteo_model"
-
-    if not downloaded_model_dir.exists():
-        raise RuntimeError(
-            f"Downloaded HF repo does not contain 'CustomCNN_3_knee_osteo_model' folder.\n"
-            f"Repo path: {repo_path}"
-        )
-
-    # Copy or point MODEL_DIR to the downloaded folder
-    MODEL_DIR = downloaded_model_dir
+    # Your repo structure:
+    # AbineshwarV/customcnn-3-knee-osteo-knee
+    # ├── .gitattributes
+    # └── CustomCNN_3_knee_osteo_model/
+    MODEL_DIR = snapshot_dir / "CustomCNN_3_knee_osteo_model"
     MODEL_PATH = str(MODEL_DIR)
     weights_file = MODEL_DIR / "model.weights.h5"
 
     if not weights_file.exists():
         raise RuntimeError(
-            f"'model.weights.h5' not found in downloaded folder: {MODEL_DIR}"
+            f"After downloading from Hugging Face, {weights_file} not found.\n"
+            "Check that the repo contains 'CustomCNN_3_knee_osteo_model/model.weights.h5'."
         )
 
-    print("[MODEL] Using model from Hugging Face snapshot at:", MODEL_DIR)
+    print("[MODEL] Model ready at:", MODEL_DIR)
 
 
 def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
@@ -147,21 +138,12 @@ def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
 def find_last_conv_layer(model):
     """Find last convolutional layer name in a model (search from end)."""
     for layer in reversed(model.layers):
-        # Works whether layer is instance of Conv2D or has "conv" in class name
         if isinstance(layer, Conv2D) or layer.__class__.__name__.lower().startswith("conv"):
             return layer.name
     raise ValueError("No Conv2D layer found in the model. Grad-CAM requires a convolutional layer.")
 
 
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """
-    Generate a Grad-CAM heatmap for a given image and model.
-    img_array: (1,H,W,3) preprocessed numpy array or tensor
-    model: keras model
-    last_conv_layer_name: name of the convolutional layer to use
-    pred_index: class index to explain (if None, the model argmax is used)
-    Returns: heatmap (H, W) normalized to [0,1] as numpy array
-    """
     grad_model = tf.keras.models.Model(
         inputs=model.inputs,
         outputs=[model.get_layer(last_conv_layer_name).output, model.output]
@@ -197,16 +179,12 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     if max_val == 0:
         h = np.zeros((heatmap.shape[0], heatmap.shape[1]), dtype=np.float32)
         return h
-
     heatmap = heatmap / max_val
+
     return heatmap.numpy()
 
 
 def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, label_text: str):
-    """
-    Create a heatmap overlay and show/save results.
-    heatmap: numpy (h,w) in [0,1]
-    """
     heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(
         original_pil.size, resample=Image.BILINEAR
     )
@@ -216,6 +194,7 @@ def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, la
     colored_heatmap = cmap(heatmap_arr)[:, :, :3]
 
     orig_arr = np.asarray(original_pil.convert("RGB")).astype("float32") / 255.0
+
     overlay = orig_arr * (1 - HEATMAP_ALPHA) + colored_heatmap * HEATMAP_ALPHA
     overlay = np.clip(overlay, 0, 1)
 
@@ -243,6 +222,10 @@ def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, la
 
 
 def pick_image_file():
+    if Tk is None or filedialog is None:
+        print("[WARN] Tkinter not available. Cannot open file dialog.")
+        return None
+
     Tk().withdraw()
     path = filedialog.askopenfilename(
         title="Select image",
@@ -252,8 +235,7 @@ def pick_image_file():
 
 
 def main():
-    # Local GUI usage only (not used in HF Space)
-    print("[INFO] Ensuring model...")
+    # 🆕 make sure model exists (local or download from HF)
     ensure_model_downloaded()
 
     print("[INFO] Loading model:", MODEL_PATH)
@@ -261,7 +243,8 @@ def main():
         model = load_model(MODEL_PATH)
     except Exception as e:
         print("[ERROR] Failed to load model:", e)
-        messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
+        if messagebox:
+            messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
         return
 
     print("[INFO] Model loaded. Finding last conv layer...")
@@ -270,7 +253,8 @@ def main():
         print(f"[INFO] Using last conv layer: {last_conv_layer_name}")
     except Exception as e:
         print("[ERROR] Could not find a conv layer:", e)
-        messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
+        if messagebox:
+            messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
         return
 
     try:
@@ -292,7 +276,8 @@ def main():
             pil_img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print("[ERROR] Could not open image:", e)
-            messagebox.showerror("Open error", f"Failed to open image: {e}")
+            if messagebox:
+                messagebox.showerror("Open error", f"Failed to open image: {e}")
             continue
 
         x = preprocess_pil(pil_img, target_size=IMG_SIZE)
@@ -312,7 +297,8 @@ def main():
             heatmap = make_gradcam_heatmap(x, model, last_conv_layer_name, pred_idx)
         except Exception as e:
             print("[ERROR] Could not compute Grad-CAM:", e)
-            messagebox.showerror("Grad-CAM error", f"Could not compute Grad-CAM:\n{e}")
+            if messagebox:
+                messagebox.showerror("Grad-CAM error", f"Could not compute Grad-CAM:\n{e}")
             continue
 
         save_and_show_gradcam(pil_img, heatmap, img_path, f"{pred_label} ({pred_prob:.2f})")
