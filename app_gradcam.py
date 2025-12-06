@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 
-# ✅ Try importing tkinter (GUI) – OK on your PC, missing on Render
+# ✅ Try tkinter, but don't crash if missing (Render)
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, Tk
@@ -29,11 +29,13 @@ except ImportError:
     TK_AVAILABLE = False
 
 import tensorflow as tf
+from tensorflow.keras.models import load_model
 from tensorflow.keras.layers import Conv2D
-from tensorflow.keras import layers, models
 
-# ✅ for downloading model from Hugging Face Hub
-from huggingface_hub import snapshot_download
+# ✅ For downloading & unzipping model on Render
+import requests
+import zipfile
+import tempfile
 
 # -----------------------------
 # USER SETTINGS (edit if needed)
@@ -42,11 +44,24 @@ from huggingface_hub import snapshot_download
 # Base directory = folder where this file lives
 BASE_DIR = Path(__file__).resolve().parent
 
-# Original local Windows model folder (your existing path)
-LOCAL_MODEL_DIR = Path(r"C:\Final_Year_Project\CustomCNN_3_knee_osteo_model")
+# H5 model filename we will use everywhere
+MODEL_FILENAME = "CustomCNN_3_knee_osteo_model.h5"
 
-# Default model folder inside the project (for non-Windows env)
-DEFAULT_MODEL_DIR = BASE_DIR / "CustomCNN_3_knee_osteo_model"
+# Original local Windows model file (you created this)
+LOCAL_MODEL_FILE = Path(r"C:\Final_Year_Project") / MODEL_FILENAME
+
+# Default model file inside the project (for Render)
+DEFAULT_MODEL_FILE = BASE_DIR / MODEL_FILENAME
+
+# Initial MODEL_PATH: prefer local file if it exists
+if LOCAL_MODEL_FILE.exists():
+    MODEL_PATH = str(LOCAL_MODEL_FILE)
+else:
+    MODEL_PATH = str(DEFAULT_MODEL_FILE)
+
+# On Render, set this env var to a direct-download URL of a ZIP containing
+# CustomCNN_3_knee_osteo_model.h5 at its root.
+MODEL_ZIP_URL = os.environ.get("MODEL_ZIP_URL")
 
 # Class labels in the SAME order used during training
 CLASS_NAMES = ["Osteopenia", "Osteoporosis", "Normal"]
@@ -56,104 +71,70 @@ IMG_SIZE = (224, 224)
 
 # Heatmap overlay alpha
 HEATMAP_ALPHA = 0.4
-
-# Name of the weights file we expect (saved via model.save_weights)
-WEIGHTS_FILENAME = "model.weights.h5"
-
-# On Render, set this env var to your HF repo id, e.g. "AbineshwarV/customcnn-3-knee-osteo-knee"
-HF_REPO_ID = os.environ.get("HF_REPO_ID")
-HF_REVISION = os.environ.get("HF_REVISION")  # optional (branch/tag/commit), or None
 # -----------------------------
-
-
-def build_customcnn_model(input_shape=(224, 224, 3), num_classes=len(CLASS_NAMES)):
-    """
-    Recreate EXACTLY the same architecture you used when training.
-
-    ⚠️ IMPORTANT:
-    Replace the sample architecture below with your real training model
-    (same layers, same order, same activation functions, same final units).
-    """
-    model = models.Sequential()
-
-    # ---------- SAMPLE ARCHITECTURE (REPLACE WITH YOURS) ----------
-    model.add(layers.Conv2D(32, (3, 3), activation="relu", input_shape=input_shape))
-    model.add(layers.MaxPooling2D((2, 2)))
-
-    model.add(layers.Conv2D(64, (3, 3), activation="relu"))
-    model.add(layers.MaxPooling2D((2, 2)))
-
-    model.add(layers.Conv2D(128, (3, 3), activation="relu"))
-    model.add(layers.MaxPooling2D((2, 2)))
-
-    model.add(layers.Flatten())
-    model.add(layers.Dense(128, activation="relu"))
-    model.add(layers.Dense(num_classes, activation="softmax"))
-    # --------------------------------------------------------------
-
-    return model
 
 
 def ensure_model_downloaded():
     """
-    Ensure that a folder with `model.weights.h5` exists somewhere we can use.
+    Ensure that a single H5 file (CustomCNN_3_knee_osteo_model.h5) exists.
 
     Behaviour:
-    - If LOCAL_MODEL_DIR exists on disk and has weights file, use that (your Windows path).
-    - Else, use the project-relative folder DEFAULT_MODEL_DIR.
-      If weights not present there either, try downloading from Hugging Face Hub using HF_REPO_ID.
-
-    Returns:
-        Path object pointing to the folder that contains model.weights.h5
+    - If LOCAL_MODEL_FILE exists on disk, use that (your Windows path).
+    - Else, expect DEFAULT_MODEL_FILE inside the project.
+      If not present, download a ZIP from MODEL_ZIP_URL and extract it.
     """
-    # Prefer your original local folder (for development on your PC)
-    local_weights = LOCAL_MODEL_DIR / WEIGHTS_FILENAME
-    if LOCAL_MODEL_DIR.exists() and local_weights.exists():
-        print("[MODEL] Using existing local model folder:", LOCAL_MODEL_DIR)
-        return LOCAL_MODEL_DIR
+    global MODEL_PATH
 
-    # Otherwise, use project-relative folder (works on Render too)
-    model_dir = DEFAULT_MODEL_DIR
-    weights_file = model_dir / WEIGHTS_FILENAME
+    # 1) Use your local H5 when running on your PC
+    if LOCAL_MODEL_FILE.exists():
+        MODEL_PATH = str(LOCAL_MODEL_FILE)
+        print("[MODEL] Using existing local H5 model at:", LOCAL_MODEL_FILE)
+        return
 
-    # If weights already exist there, we're done
-    if weights_file.exists():
-        print("[MODEL] Using model folder in project dir:", model_dir)
-        return model_dir
+    # 2) Use project H5 if it already exists (Render after first deploy)
+    if DEFAULT_MODEL_FILE.exists():
+        MODEL_PATH = str(DEFAULT_MODEL_FILE)
+        print("[MODEL] Using H5 model in project dir:", DEFAULT_MODEL_FILE)
+        return
 
-    # If no HF repo configured, we cannot download automatically
-    if not HF_REPO_ID:
+    # 3) Need to download ZIP from URL (Render first run)
+    if not MODEL_ZIP_URL:
         raise RuntimeError(
-            f"Model weights not found at {local_weights} or {weights_file}, "
-            "and HF_REPO_ID is not set.\n"
-            "Set HF_REPO_ID, e.g. 'AbineshwarV/customcnn-3-knee-osteo-knee', "
-            "and make sure it contains model.weights.h5 at the root."
+            "Model file not found and MODEL_ZIP_URL is not set.\n"
+            "Set MODEL_ZIP_URL to a direct-download ZIP containing "
+            f"{MODEL_FILENAME} at its root."
         )
 
-    print("[MODEL] Model not found locally. Downloading from Hugging Face Hub...")
-    print("        repo_id =", HF_REPO_ID)
-    if HF_REVISION:
-        print("        revision =", HF_REVISION)
+    print("[MODEL] H5 model not found locally. Downloading ZIP from:")
+    print("        ", MODEL_ZIP_URL)
 
-    # Download entire repo into DEFAULT_MODEL_DIR
-    snapshot_download(
-        repo_id=HF_REPO_ID,
-        revision=HF_REVISION,
-        local_dir=str(model_dir),
-        local_dir_use_symlinks=False,
-        repo_type="model",
-    )
+    DEFAULT_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # After download, check weights file
-    if not weights_file.exists():
+    # Download ZIP to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        with requests.get(MODEL_ZIP_URL, stream=True) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    tmp.write(chunk)
+
+    print("[MODEL] Download complete. Extracting ZIP...")
+
+    # We assume the ZIP contains CustomCNN_3_knee_osteo_model.h5 at its root
+    with zipfile.ZipFile(tmp_path, "r") as zip_ref:
+        zip_ref.extractall(BASE_DIR)
+
+    tmp_path.unlink(missing_ok=True)
+
+    if not DEFAULT_MODEL_FILE.exists():
         raise RuntimeError(
-            f"After download, {weights_file} not found.\n"
-            "Make sure your HF repo contains model.weights.h5 at its root "
-            "(or adjust WEIGHTS_FILENAME / path logic accordingly)."
+            f"After extraction, {DEFAULT_MODEL_FILE} not found.\n"
+            f"Check that the ZIP contains '{MODEL_FILENAME}' at its root."
         )
 
-    print("[MODEL] Model downloaded to:", model_dir)
-    return model_dir
+    MODEL_PATH = str(DEFAULT_MODEL_FILE)
+    print("[MODEL] H5 model extracted to:", DEFAULT_MODEL_FILE)
 
 
 def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
@@ -288,7 +269,6 @@ def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, la
 
 def pick_image_file():
     if not TK_AVAILABLE:
-        # On a headless server like Render, this won't be used anyway.
         raise RuntimeError("Tkinter GUI is not available in this environment.")
     Tk().withdraw()
     path = filedialog.askopenfilename(
@@ -299,22 +279,21 @@ def pick_image_file():
 
 
 def main():
-    # Ensure we have weights somewhere
-    model_dir = ensure_model_downloaded()
-    weights_path = model_dir / WEIGHTS_FILENAME
+    # Ensure H5 model is present locally
+    ensure_model_downloaded()
 
-    print("[INFO] Loading model weights from:", weights_path)
+    # Load model
+    print("[INFO] Loading model from:", MODEL_PATH)
     try:
-        model = build_customcnn_model(input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3), num_classes=len(CLASS_NAMES))
-        model.load_weights(str(weights_path))
+        model = load_model(MODEL_PATH)
     except Exception as e:
-        print("[ERROR] Failed to load model weights:", e)
+        print("[ERROR] Failed to load model:", e)
         if TK_AVAILABLE and messagebox is not None:
-            messagebox.showerror("Model load error", f"Failed to load model weights:\n{e}")
+            messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
         return
 
     # Find last conv layer
-    print("[INFO] Model built. Finding last conv layer...")
+    print("[INFO] Model loaded. Finding last conv layer...")
     try:
         last_conv_layer_name = find_last_conv_layer(model)
         print(f"[INFO] Using last conv layer: {last_conv_layer_name}")
