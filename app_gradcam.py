@@ -32,10 +32,8 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.layers import Conv2D
 
-# ✅ For downloading & unzipping model on Render
-import requests
-import zipfile
-import tempfile
+# ✅ Hugging Face Hub for downloading model
+from huggingface_hub import snapshot_download
 
 # -----------------------------
 # USER SETTINGS (edit if needed)
@@ -44,24 +42,24 @@ import tempfile
 # Base directory = folder where this file lives
 BASE_DIR = Path(__file__).resolve().parent
 
-# H5 model filename we will use everywhere
+# Name of the H5 model file
 MODEL_FILENAME = "CustomCNN_3_knee_osteo_model.h5"
 
-# Original local Windows model file (you created this)
+# Local Windows H5 path (after you saved it)
 LOCAL_MODEL_FILE = Path(r"C:\Final_Year_Project") / MODEL_FILENAME
 
-# Default model file inside the project (for Render)
+# Default H5 path in project (for Render)
 DEFAULT_MODEL_FILE = BASE_DIR / MODEL_FILENAME
 
-# Initial MODEL_PATH: prefer local file if it exists
-if LOCAL_MODEL_FILE.exists():
-    MODEL_PATH = str(LOCAL_MODEL_FILE)
-else:
-    MODEL_PATH = str(DEFAULT_MODEL_FILE)
+# Where to cache HF downloads
+HF_CACHE_DIR = BASE_DIR / "hf_model_cache"
 
-# On Render, set this env var to a direct-download URL of a ZIP containing
-# CustomCNN_3_knee_osteo_model.h5 at its root.
-MODEL_ZIP_URL = os.environ.get("MODEL_ZIP_URL")
+# Hugging Face model repo info
+HF_REPO_ID = os.environ.get("HF_REPO_ID", "AbineshwarV/customcnn-3-knee-osteo-knee")
+HF_REVISION = os.environ.get("HF_REVISION")  # optional
+
+# This will be updated by ensure_model_downloaded()
+MODEL_PATH = str(DEFAULT_MODEL_FILE)
 
 # Class labels in the SAME order used during training
 CLASS_NAMES = ["Osteopenia", "Osteoporosis", "Normal"]
@@ -76,65 +74,84 @@ HEATMAP_ALPHA = 0.4
 
 def ensure_model_downloaded():
     """
-    Ensure that a single H5 file (CustomCNN_3_knee_osteo_model.h5) exists.
+    Ensure a single H5 model file exists and set MODEL_PATH to it.
 
-    Behaviour:
-    - If LOCAL_MODEL_FILE exists on disk, use that (your Windows path).
-    - Else, expect DEFAULT_MODEL_FILE inside the project.
-      If not present, download a ZIP from MODEL_ZIP_URL and extract it.
+    Order:
+    1. If LOCAL_MODEL_FILE exists (on your PC), use that.
+    2. Else if DEFAULT_MODEL_FILE exists (in repo / after first download), use that.
+    3. Else download from Hugging Face Hub into HF_CACHE_DIR and
+       pick the .h5 file (prefer MODEL_FILENAME if present).
     """
     global MODEL_PATH
 
-    # 1) Use your local H5 when running on your PC
+    # 1) Use local PC file
     if LOCAL_MODEL_FILE.exists():
         MODEL_PATH = str(LOCAL_MODEL_FILE)
-        print("[MODEL] Using existing local H5 model at:", LOCAL_MODEL_FILE)
+        print("[MODEL] Using local H5 model:", MODEL_PATH)
         return
 
-    # 2) Use project H5 if it already exists (Render after first deploy)
+    # 2) Use project H5 (already present)
     if DEFAULT_MODEL_FILE.exists():
         MODEL_PATH = str(DEFAULT_MODEL_FILE)
-        print("[MODEL] Using H5 model in project dir:", DEFAULT_MODEL_FILE)
+        print("[MODEL] Using project H5 model:", MODEL_PATH)
         return
 
-    # 3) Need to download ZIP from URL (Render first run)
-    if not MODEL_ZIP_URL:
+    # 3) Need to download from HF
+    if not HF_REPO_ID:
+        raise RuntimeError("HF_REPO_ID is not set and no local model file found.")
+
+    print("[MODEL] H5 model not found locally. Downloading from Hugging Face Hub...")
+    print("        repo_id =", HF_REPO_ID)
+    if HF_REVISION:
+        print("        revision =", HF_REVISION)
+
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Download all repo files into cache dir
+    local_dir = snapshot_download(
+        repo_id=HF_REPO_ID,
+        revision=HF_REVISION,
+        local_dir=str(HF_CACHE_DIR),
+        local_dir_use_symlinks=False,
+        repo_type="model",
+    )
+
+    local_dir = Path(local_dir)
+    print("[MODEL] Files downloaded under:", local_dir)
+
+    # Find .h5 file
+    candidates = []
+    for root, dirs, files in os.walk(local_dir):
+        for name in files:
+            if name.endswith(".h5"):
+                candidates.append(Path(root) / name)
+
+    if not candidates:
         raise RuntimeError(
-            "Model file not found and MODEL_ZIP_URL is not set.\n"
-            "Set MODEL_ZIP_URL to a direct-download ZIP containing "
-            f"{MODEL_FILENAME} at its root."
+            f"No .h5 files found in HF repo {HF_REPO_ID}. "
+            "Upload your CustomCNN_3_knee_osteo_model.h5 there."
         )
 
-    print("[MODEL] H5 model not found locally. Downloading ZIP from:")
-    print("        ", MODEL_ZIP_URL)
+    # Prefer file named exactly MODEL_FILENAME if present
+    chosen = None
+    for p in candidates:
+        if p.name == MODEL_FILENAME:
+            chosen = p
+            break
+    if chosen is None:
+        chosen = candidates[0]
 
-    DEFAULT_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    print("[MODEL] Using downloaded H5 model:", chosen)
 
-    # Download ZIP to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        with requests.get(MODEL_ZIP_URL, stream=True) as r:
-            r.raise_for_status()
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    tmp.write(chunk)
-
-    print("[MODEL] Download complete. Extracting ZIP...")
-
-    # We assume the ZIP contains CustomCNN_3_knee_osteo_model.h5 at its root
-    with zipfile.ZipFile(tmp_path, "r") as zip_ref:
-        zip_ref.extractall(BASE_DIR)
-
-    tmp_path.unlink(missing_ok=True)
-
-    if not DEFAULT_MODEL_FILE.exists():
-        raise RuntimeError(
-            f"After extraction, {DEFAULT_MODEL_FILE} not found.\n"
-            f"Check that the ZIP contains '{MODEL_FILENAME}' at its root."
-        )
-
-    MODEL_PATH = str(DEFAULT_MODEL_FILE)
-    print("[MODEL] H5 model extracted to:", DEFAULT_MODEL_FILE)
+    # Also copy it into project root as DEFAULT_MODEL_FILE for next time (optional but nice)
+    try:
+        DEFAULT_MODEL_FILE.write_bytes(chosen.read_bytes())
+        MODEL_PATH = str(DEFAULT_MODEL_FILE)
+        print("[MODEL] Copied to project file:", DEFAULT_MODEL_FILE)
+    except Exception as e:
+        # If copy fails, just use the cache path
+        print("[MODEL] Could not copy model to project dir:", e)
+        MODEL_PATH = str(chosen)
 
 
 def preprocess_pil(pil_img: Image.Image, target_size=IMG_SIZE) -> np.ndarray:
@@ -162,7 +179,6 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     pred_index: class index to explain (if None, the model argmax is used)
     Returns: heatmap (H, W) normalized to [0,1] as numpy array
     """
-    # Build a model mapping inputs -> (last_conv_output, predictions)
     grad_model = tf.keras.models.Model(
         inputs=model.inputs,
         outputs=[model.get_layer(last_conv_layer_name).output, model.output]
@@ -171,80 +187,49 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
 
     with tf.GradientTape() as tape:
-        # Forward pass
         conv_outputs, predictions = grad_model(img_tensor)
 
-        # If model output is a list/tuple (multi-output), take the first tensor
         if isinstance(predictions, (list, tuple)):
             predictions = predictions[0]
 
-        # Determine target index
         if pred_index is None:
             pred_index = tf.argmax(predictions[0])
 
-        # Ensure we watch conv_outputs
         tape.watch(conv_outputs)
-
-        # Score for target class
         class_channel = predictions[:, pred_index]
 
-    # Gradients of the class output w.r.t. convolutional layer outputs
     grads = tape.gradient(class_channel, conv_outputs)
-
-    # If grads is list/tuple, take first
     if isinstance(grads, (list, tuple)):
         grads = grads[0]
 
-    # Global average pooling of gradients over (H, W)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    # Get conv outputs for the image: shape (H, W, C)
     conv_outputs = conv_outputs[0]
-
-    # Convert pooled_grads dtype to match conv_outputs
     pooled_grads = tf.cast(pooled_grads, conv_outputs.dtype)
 
-    # Compute weighted combination: tensordot over channels
-    # conv_outputs: H x W x C, pooled_grads: C
     heatmap = tf.tensordot(conv_outputs, pooled_grads, axes=[[2], [0]])
-
-    # Apply ReLU to keep only positive influences
     heatmap = tf.nn.relu(heatmap)
 
-    # Normalize to [0,1]
     max_val = tf.reduce_max(heatmap)
     if max_val == 0:
-        # avoid div-by-zero
-        h = np.zeros((heatmap.shape[0], heatmap.shape[1]), dtype=np.float32)
-        return h
+        return np.zeros((heatmap.shape[0], heatmap.shape[1]), dtype=np.float32)
     heatmap = heatmap / max_val
 
     return heatmap.numpy()
 
 
 def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, label_text: str):
-    """
-    Create a heatmap overlay and show/save results.
-    heatmap: numpy (h,w) in [0,1]
-    """
-    # Resize heatmap to original image size
+    """Create a heatmap overlay and show/save results."""
     heatmap_img = Image.fromarray(np.uint8(255 * heatmap)).resize(original_pil.size, resample=Image.BILINEAR)
-    heatmap_arr = np.asarray(heatmap_img).astype("float32") / 255.0  # 0..1
+    heatmap_arr = np.asarray(heatmap_img).astype("float32") / 255.0
 
-    # Create color map (jet-like) using matplotlib
     cmap = plt.get_cmap("jet")
-    colored_heatmap = cmap(heatmap_arr)[:, :, :3]  # drop alpha channel
+    colored_heatmap = cmap(heatmap_arr)[:, :, :3]
 
-    # Convert original to float array [0,1]
     orig_arr = np.asarray(original_pil.convert("RGB")).astype("float32") / 255.0
-
-    # Overlay
-    overlay = orig_arr * (1 - HEATMAP_ALPHA) + colored_heatmap * HEATMAP_ALPHA
-    overlay = np.clip(overlay, 0, 1)
+    overlay = np.clip(orig_arr * (1 - HEATMAP_ALPHA) + colored_heatmap * HEATMAP_ALPHA, 0, 1)
 
     overlay_pil = Image.fromarray(np.uint8(overlay * 255))
 
-    # Display side-by-side (Original | Heatmap | Overlay)
     fig, axes = plt.subplots(1, 3, figsize=(16, 6))
     axes[0].imshow(original_pil)
     axes[0].set_title("Original")
@@ -261,7 +246,6 @@ def save_and_show_gradcam(original_pil: Image.Image, heatmap, out_path: Path, la
     plt.tight_layout()
     plt.show()
 
-    # Save overlay next to original
     overlay_path = out_path.with_name(out_path.stem + "_gradcam.png")
     overlay_pil.save(overlay_path)
     print(f"[INFO] Grad-CAM overlay saved to: {overlay_path}")
@@ -279,7 +263,7 @@ def pick_image_file():
 
 
 def main():
-    # Ensure H5 model is present locally
+    # ✅ Ensure H5 model exists (local or from HF)
     ensure_model_downloaded()
 
     # Load model
@@ -292,7 +276,6 @@ def main():
             messagebox.showerror("Model load error", f"Failed to load model:\n{e}")
         return
 
-    # Find last conv layer
     print("[INFO] Model loaded. Finding last conv layer...")
     try:
         last_conv_layer_name = find_last_conv_layer(model)
@@ -303,7 +286,7 @@ def main():
             messagebox.showerror("No conv layer", f"Could not find a Conv2D layer: {e}")
         return
 
-    # Warmup predict to initialize everything
+    # Warmup predict
     try:
         dummy = np.zeros((1, IMG_SIZE[0], IMG_SIZE[1], 3), dtype="float32")
         model.predict(dummy)
@@ -329,21 +312,17 @@ def main():
 
         x = preprocess_pil(pil_img, target_size=IMG_SIZE)
 
-        # model prediction
         preds = model.predict(x)
-
-        # handle if model.predict returns list/tuple
         if isinstance(preds, (list, tuple)):
             preds = preds[0]
-
         preds = np.asarray(preds)[0]
+
         pred_idx = int(np.argmax(preds))
         pred_label = CLASS_NAMES[pred_idx] if pred_idx < len(CLASS_NAMES) else f"class_{pred_idx}"
         pred_prob = float(preds[pred_idx])
 
         print(f"[RESULT] Predicted: {pred_label} (index {pred_idx}) — confidence {pred_prob:.4f}")
 
-        # Grad-CAM heatmap
         try:
             heatmap = make_gradcam_heatmap(x, model, last_conv_layer_name, pred_idx)
         except Exception as e:
@@ -352,7 +331,6 @@ def main():
                 messagebox.showerror("Grad-CAM error", f"Could not compute Grad-CAM:\n{e}")
             continue
 
-        # Save and show
         save_and_show_gradcam(pil_img, heatmap, img_path, f"{pred_label} ({pred_prob:.2f})")
 
     print("[INFO] Done.")
